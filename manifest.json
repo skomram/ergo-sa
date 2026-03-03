@@ -3,6 +3,7 @@
   "description": "Synchronizacja produktow i kategorii z Ergonode PIM do sklepu Sellasist",
   "version": "4.0.0",
   "compatible": "0.0.0",
+  "write_access": false,
   "features": [
     "synchronization",
     "synchronization_full"

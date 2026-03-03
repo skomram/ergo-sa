@@ -1,9 +1,9 @@
 {
   "name": "Sellasist Connector",
-  "description": "Synchronizacja produktów i kategorii z Ergonode do Sellasist",
-  "version": "3.4.0",
+  "description": "Synchronizacja produktow i kategorii z Ergonode PIM do sklepu Sellasist",
+  "version": "4.0.0",
+  "compatible": "0.0.0",
   "features": [
-    "configuration",
     "synchronization",
     "synchronization_full"
   ],
@@ -21,109 +21,132 @@
   "configuration_schema": [
     {
       "title": "Połączenie z Sellasist",
-      "description": "Podaj dane dostępowe do sklepu Sellasist",
       "type": "object",
       "properties": {
-        "x_sa_host": {
-          "title": "Domena sklepu",
-          "description": "Nazwa sklepu Sellasist (np. mojsklep lub mojsklep.sellasist.pl)",
+        "shop_domain": {
           "type": "string",
-          "widget": "text"
+          "title": "Domena sklepu Sellasist",
+          "propertyOrder": 1
         },
-        "x_sa_token": {
-          "title": "Klucz API",
-          "description": "Klucz API Sellasist (Ustawienia > API)",
+        "api_key": {
           "type": "string",
-          "widget": "text"
+          "title": "Klucz API Sellasist",
+          "widget": "password",
+          "propertyOrder": 2
         }
       },
-      "required": ["x_sa_host", "x_sa_token"]
+      "required": [
+        "shop_domain",
+        "api_key"
+      ]
     },
     {
       "title": "Mapowanie atrybutów",
-      "description": "Przypisz atrybuty Ergonode do pól Sellasist. Pola oznaczone jako [Pomiń] zostaną zignorowane.",
       "type": "object",
       "properties": {
         "attributeMapping": {
-          "title": "Mapowanie atrybutów",
           "type": "array",
-          "widget": "mapper",
+          "title": "Mapowanie atrybutów",
           "items": {
+            "title": "prototype",
             "type": "object",
             "properties": {
               "ergonode": {
-                "type": "string"
+                "type": "string",
+                "title": "ergonode",
+                "propertyOrder": 1
               },
               "app": {
-                "type": "string"
+                "type": "string",
+                "title": "app",
+                "propertyOrder": 2
               }
+            },
+            "required": [
+              "ergonode",
+              "app"
+            ]
+          },
+          "widget": {
+            "type": "mapper",
+            "options": {
+              "ergonodeDictionary": "ergonode:attributes",
+              "appDictionary": "app:sellasist_fields"
             }
           },
-          "ergonodeDictionary": "ergonode:attributes",
-          "appDictionary": "app:sellasist_fields"
+          "propertyOrder": 1
         }
       },
-      "required": ["attributeMapping"]
+      "required": [
+        "attributeMapping"
+      ]
     },
     {
       "title": "Ustawienia synchronizacji",
-      "description": "Skonfiguruj parametry synchronizacji",
       "type": "object",
       "properties": {
         "defaultLanguage": {
-          "title": "Język domyślny",
-          "description": "Język źródłowy atrybutów Ergonode",
           "type": "string",
-          "widget": "enum",
-          "enum": ["pl_PL", "en_GB", "de_DE", "fr_FR", "cs_CZ", "sk_SK"],
-          "enumLabels": {
-            "pl_PL": "Polski",
-            "en_GB": "Angielski",
-            "de_DE": "Niemiecki",
-            "fr_FR": "Francuski",
-            "cs_CZ": "Czeski",
-            "sk_SK": "Słowacki"
+          "title": "Język domyślny",
+          "options": {
+            "enum_dictionary": "ergonode:languages"
           },
-          "default": "pl_PL"
+          "propertyOrder": 1
         },
         "syncMode": {
-          "title": "Tryb synchronizacji",
           "type": "string",
-          "widget": "enum",
-          "enum": ["create_and_update", "create_only", "update_only"],
-          "enumLabels": {
-            "create_and_update": "Tworzenie i aktualizacja",
-            "create_only": "Tylko tworzenie nowych",
-            "update_only": "Tylko aktualizacja istniejących"
+          "title": "Tryb synchronizacji",
+          "enum": [
+            "create_and_update",
+            "create_only",
+            "update_only"
+          ],
+          "options": {
+            "enum_titles": [
+              "Tworzenie i aktualizacja",
+              "Tylko tworzenie nowych",
+              "Tylko aktualizacja istniejących"
+            ]
           },
-          "default": "create_and_update"
+          "propertyOrder": 2
         },
         "skuAsSymbol": {
-          "title": "SKU jako symbol produktu",
-          "description": "Użyj SKU z Ergonode jako symbolu produktu w Sellasist",
           "type": "string",
-          "widget": "enum",
-          "enum": ["yes", "no"],
-          "enumLabels": {
-            "yes": "Tak",
-            "no": "Nie"
+          "title": "SKU jako symbol produktu",
+          "enum": [
+            "yes",
+            "no"
+          ],
+          "options": {
+            "enum_titles": [
+              "Tak",
+              "Nie"
+            ]
           },
-          "default": "yes"
+          "propertyOrder": 3
         },
         "syncCategories": {
-          "title": "Synchronizuj kategorie",
-          "description": "Synchronizuj kategorie z Ergonode do Sellasist",
           "type": "string",
-          "widget": "enum",
-          "enum": ["yes", "no"],
-          "enumLabels": {
-            "yes": "Tak",
-            "no": "Nie"
+          "title": "Synchronizuj kategorie",
+          "enum": [
+            "yes",
+            "no"
+          ],
+          "options": {
+            "enum_titles": [
+              "Tak",
+              "Nie"
+            ]
           },
-          "default": "yes"
+          "propertyOrder": 4
         }
       },
-      "required": ["defaultLanguage", "syncMode"]
+      "required": [
+        "defaultLanguage",
+        "syncMode",
+        "skuAsSymbol",
+        "syncCategories"
+      ]
     }
   ]
 }

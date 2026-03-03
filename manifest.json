@@ -1,0 +1,129 @@
+{
+  "name": "Sellasist Connector",
+  "description": "Synchronizacja produktów i kategorii z Ergonode do Sellasist",
+  "version": "3.4.0",
+  "features": [
+    "configuration",
+    "synchronization",
+    "synchronization_full"
+  ],
+  "events": [
+    "app_installed",
+    "app_uninstalled",
+    "product_created",
+    "product_updated",
+    "product_deleted",
+    "category_created",
+    "category_updated",
+    "category_deleted",
+    "synchronization_ended"
+  ],
+  "configuration_schema": [
+    {
+      "title": "Połączenie z Sellasist",
+      "description": "Podaj dane dostępowe do sklepu Sellasist",
+      "type": "object",
+      "properties": {
+        "x_sa_host": {
+          "title": "Domena sklepu",
+          "description": "Nazwa sklepu Sellasist (np. mojsklep lub mojsklep.sellasist.pl)",
+          "type": "string",
+          "widget": "text"
+        },
+        "x_sa_token": {
+          "title": "Klucz API",
+          "description": "Klucz API Sellasist (Ustawienia > API)",
+          "type": "string",
+          "widget": "text"
+        }
+      },
+      "required": ["x_sa_host", "x_sa_token"]
+    },
+    {
+      "title": "Mapowanie atrybutów",
+      "description": "Przypisz atrybuty Ergonode do pól Sellasist. Pola oznaczone jako [Pomiń] zostaną zignorowane.",
+      "type": "object",
+      "properties": {
+        "attributeMapping": {
+          "title": "Mapowanie atrybutów",
+          "type": "array",
+          "widget": "mapper",
+          "items": {
+            "type": "object",
+            "properties": {
+              "ergonode": {
+                "type": "string"
+              },
+              "app": {
+                "type": "string"
+              }
+            }
+          },
+          "ergonodeDictionary": "ergonode:attributes",
+          "appDictionary": "app:sellasist_fields"
+        }
+      },
+      "required": ["attributeMapping"]
+    },
+    {
+      "title": "Ustawienia synchronizacji",
+      "description": "Skonfiguruj parametry synchronizacji",
+      "type": "object",
+      "properties": {
+        "defaultLanguage": {
+          "title": "Język domyślny",
+          "description": "Język źródłowy atrybutów Ergonode",
+          "type": "string",
+          "widget": "enum",
+          "enum": ["pl_PL", "en_GB", "de_DE", "fr_FR", "cs_CZ", "sk_SK"],
+          "enumLabels": {
+            "pl_PL": "Polski",
+            "en_GB": "Angielski",
+            "de_DE": "Niemiecki",
+            "fr_FR": "Francuski",
+            "cs_CZ": "Czeski",
+            "sk_SK": "Słowacki"
+          },
+          "default": "pl_PL"
+        },
+        "syncMode": {
+          "title": "Tryb synchronizacji",
+          "type": "string",
+          "widget": "enum",
+          "enum": ["create_and_update", "create_only", "update_only"],
+          "enumLabels": {
+            "create_and_update": "Tworzenie i aktualizacja",
+            "create_only": "Tylko tworzenie nowych",
+            "update_only": "Tylko aktualizacja istniejących"
+          },
+          "default": "create_and_update"
+        },
+        "skuAsSymbol": {
+          "title": "SKU jako symbol produktu",
+          "description": "Użyj SKU z Ergonode jako symbolu produktu w Sellasist",
+          "type": "string",
+          "widget": "enum",
+          "enum": ["yes", "no"],
+          "enumLabels": {
+            "yes": "Tak",
+            "no": "Nie"
+          },
+          "default": "yes"
+        },
+        "syncCategories": {
+          "title": "Synchronizuj kategorie",
+          "description": "Synchronizuj kategorie z Ergonode do Sellasist",
+          "type": "string",
+          "widget": "enum",
+          "enum": ["yes", "no"],
+          "enumLabels": {
+            "yes": "Tak",
+            "no": "Nie"
+          },
+          "default": "yes"
+        }
+      },
+      "required": ["defaultLanguage", "syncMode"]
+    }
+  ]
+}

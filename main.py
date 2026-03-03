@@ -409,6 +409,21 @@ async def consume_event(
         logger.info(f"[CONSUME] Sync ended: sync_id={sync_id}")
         return JSONResponse(status_code=200, content={})
 
+    # app_installed - lifecycle event routed through /consume/
+    if event_name == "app_installed":
+        inst = store.get_installation(iid) or {}
+        inst["installed"] = True
+        inst["ergonode_api_url"] = claims.get("ergonode_api_url", "")
+        store.save_installation(iid, inst)
+        logger.info(f"[CONSUME] app_installed OK for {iid}")
+        return JSONResponse(status_code=200, content={})
+
+    # app_uninstalled
+    if event_name == "app_uninstalled":
+        store.remove_installation(iid)
+        logger.info(f"[CONSUME] app_uninstalled for {iid}")
+        return JSONResponse(status_code=200, content={})
+
     # Load config
     inst = store.get_installation(iid)
     if not inst or "configuration" not in inst:

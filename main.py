@@ -27,6 +27,9 @@ from config_store import ConfigStore
 from sync_handler import SyncHandler
 from sellasist_client import SellasistClient
 
+# Path to manifest.json (same directory as main.py)
+MANIFEST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "manifest.json")
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -448,6 +451,55 @@ async def consume_event(event_name: str, request: Request,
             "violations": [],
             "retryable": True
         })
+
+
+# ---------------------------------------------------------------------------
+# Root / - Render health check & info
+# ---------------------------------------------------------------------------
+@app.get("/")
+async def root():
+    return {
+        "app": "Sellasist Connector",
+        "version": "3.4.0",
+        "status": "running",
+        "endpoints": {
+            "manifest": "/manifest.json",
+            "health": "/health",
+            "handshake": "POST /handshake",
+            "configuration": "GET|POST /configuration",
+            "dictionary": "GET /dictionary/{id}",
+            "events": "PUT /event/{name}",
+            "sync": "PUT /consume/{event}",
+        }
+    }
+
+
+@app.head("/")
+async def root_head():
+    return Response(status_code=200)
+
+
+# ---------------------------------------------------------------------------
+# GET /manifest.json - Serve app manifest for Ergonode
+# ---------------------------------------------------------------------------
+@app.get("/manifest.json")
+async def get_manifest():
+    """Serve manifest.json for Ergonode app registration."""
+    if not os.path.exists(MANIFEST_PATH):
+        logger.error(f"[MANIFEST] File not found: {MANIFEST_PATH}")
+        return JSONResponse(status_code=404,
+                            content={"error": "manifest.json not found"})
+    with open(MANIFEST_PATH) as f:
+        manifest = json.load(f)
+    return JSONResponse(status_code=200, content=manifest,
+                        media_type="application/json")
+
+
+@app.head("/manifest.json")
+async def manifest_head():
+    if os.path.exists(MANIFEST_PATH):
+        return Response(status_code=200)
+    return Response(status_code=404)
 
 
 # ---------------------------------------------------------------------------

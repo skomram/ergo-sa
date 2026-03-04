@@ -1,26 +1,15 @@
 """
 Sellasist Connector for Ergonode Apps Engine v2
 ================================================
-Version: 4.2.0
+Version: 4.3.0
 
-Endpoints per https://docs.ergonode.com/apps2/:
-  GET  /                     - Root info (Render health check)
-  GET  /manifest.json        - Serve manifest
-  POST /handshake            - Receive shared_secret
-  GET  /configuration        - Return saved configuration
-  POST /configuration        - Validate & save configuration step
-  GET  /dictionary/{id}      - Return dictionary data
-  PUT  /consume/{event}      - Handle all events (lifecycle + sync)
-  GET  /health               - Health check
-
-Changes v4.2.0:
-  - FIXED: Race condition - concurrent config step saves no longer
-    overwrite each other (atomic read-modify-write per step)
-  - Added syncDirection field (ergonode_to_sellasist / sellasist_to_ergonode)
-  - Import direction (sellasist_to_ergonode) is validated but not yet
-    implemented - requires write_access:true in manifest
-  - Improved logging in sync handler for debugging
-  - compatible bumped to 4.1.0 to force reconfiguration
+Changes v4.3.0:
+  - Bidirectional sync: import from Sellasist to Ergonode via GraphQL
+  - New config field: ergonode_api_key (X-API-KEY for GraphQL write access)
+  - write_access: true in manifest
+  - Import flow: Ergonode event -> read Sellasist -> write Ergonode GraphQL
+  - Validation: import direction requires ergonode_api_key
+  - compatible bumped to 4.2.0 to force reconfiguration
 """
 import os
 import json
@@ -35,6 +24,7 @@ from auth import decode_jwt_unverified, verify_jwt_signature
 from config_store import ConfigStore
 from sync_handler import SyncHandler
 from sellasist_client import SellasistClient
+from ergonode_client import ErgonodeClient
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -54,7 +44,6 @@ MANIFEST_PATH = os.path.join(
 
 store = ConfigStore()
 
-# Dictionary: app:sellasist_fields
 SELLASIST_FIELDS = [
     {"id": "__skip__",       "label": "[Pomiń - nie synchronizuj]"},
     {"id": "name",           "label": "Nazwa produktu",
@@ -108,11 +97,11 @@ SELLASIST_FIELDS = [
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Sellasist Connector v4.2.0 starting")
+    logger.info("Sellasist Connector v4.3.0 starting")
     yield
     logger.info("Sellasist Connector shutting down")
 
-app = FastAPI(title="Sellasist Connector", version="4.2.0", lifespan=lifespan)
+app = FastAPI(title="Sellasist Connector", version="4.3.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -133,13 +122,6 @@ def _get_api_url(claims: dict) -> str:
 
 
 def _verify_request(token: Optional[str], store_ref: ConfigStore) -> tuple:
-    """
-    Full JWT auth per Ergonode docs:
-    1. Decode without verification to get app_installation_id
-    2. Look up shared_secret
-    3. Verify JWT signature with HMAC SHA-256
-    Returns: (verified_claims, installation_id, error_response)
-    """
     if not token:
         return None, "unknown", JSONResponse(
             status_code=401,
@@ -175,7 +157,7 @@ def _verify_request(token: Optional[str], store_ref: ConfigStore) -> tuple:
 # ---------------------------------------------------------------------------
 @app.get("/")
 async def root():
-    return {"app": "Sellasist Connector", "version": "4.2.0", "status": "ok"}
+    return {"app": "Sellasist Connector", "version": "4.3.0", "status": "ok"}
 
 
 @app.head("/")
@@ -189,7 +171,6 @@ async def root_head():
 @app.get("/manifest.json")
 async def get_manifest():
     if not os.path.exists(MANIFEST_PATH):
-        logger.error(f"[MANIFEST] Not found: {MANIFEST_PATH}")
         return JSONResponse(status_code=404,
                             content={"error": "manifest.json not found"})
     with open(MANIFEST_PATH) as f:
@@ -247,8 +228,7 @@ async def get_configuration(
 
 
 # ---------------------------------------------------------------------------
-# POST /configuration
-# Uses store.update_config_step() for atomic per-step persistence
+# POST /configuration - atomic per-step save
 # ---------------------------------------------------------------------------
 @app.post("/configuration")
 async def post_configuration(
@@ -265,11 +245,13 @@ async def post_configuration(
     logger.info(f"[CONFIG] step={index} installation={iid} "
                 f"keys={list(config.keys())}")
 
-    # --- Step 0: Validate Sellasist connection ---
+    # --- Step 0: Validate connections ---
     if index == 0:
         host = config.get("shop_domain", "").strip()
         key = config.get("api_key", "").strip()
+        erg_key = config.get("ergonode_api_key", "").strip()
         violations = []
+
         if not host:
             violations.append({
                 "propertyPath": "shop_domain",
@@ -291,11 +273,12 @@ async def post_configuration(
                 "violations": violations
             })
 
+        # Test Sellasist connection
         client = SellasistClient(api_key=key, shop_domain=host)
         ok, error_msg = await client.validate_connection()
         if not ok:
             return JSONResponse(status_code=422, content={
-                "title": "Błąd połączenia",
+                "title": "Błąd połączenia Sellasist",
                 "detail": error_msg,
                 "violations": [{
                     "propertyPath": "api_key",
@@ -304,6 +287,27 @@ async def post_configuration(
                     "parameters": {}
                 }]
             })
+
+        # Test Ergonode GraphQL connection (if key provided)
+        if erg_key:
+            api_url = _get_api_url(claims)
+            if api_url:
+                erg_client = ErgonodeClient(
+                    api_url=api_url, api_key=erg_key)
+                erg_ok, erg_err = await erg_client.test_connection()
+                if not erg_ok:
+                    return JSONResponse(status_code=422, content={
+                        "title": "Błąd połączenia Ergonode GraphQL",
+                        "detail": erg_err,
+                        "violations": [{
+                            "propertyPath": "ergonode_api_key",
+                            "title": erg_err,
+                            "template": erg_err,
+                            "parameters": {}
+                        }]
+                    })
+                logger.info(
+                    f"[CONFIG] Ergonode GraphQL connection OK for {iid}")
 
     # --- Step 1: Attribute mapping ---
     if index == 1:
@@ -370,15 +374,32 @@ async def post_configuration(
                 "violations": violations
             })
 
-        # Warn about import direction (not yet implemented)
+        # Warn if import selected but no Ergonode API key
         if direction == "sellasist_to_ergonode":
-            logger.warning(
-                f"[CONFIG] Import direction selected for {iid} - "
-                f"requires write_access:true, not yet implemented")
+            inst = store.get_installation(iid) or {}
+            configs = inst.get("configuration", [])
+            step0 = configs[0] if configs else {}
+            if not step0.get("ergonode_api_key"):
+                logger.warning(
+                    f"[CONFIG] Import direction without ergonode_api_key "
+                    f"for {iid}")
+                violations.append({
+                    "propertyPath": "syncDirection",
+                    "title": "Import wymaga klucza API Ergonode "
+                             "(krok 1: Połączenie)",
+                    "template": "Import wymaga klucza API Ergonode "
+                                "(krok 1: Połączenie)",
+                    "parameters": {}
+                })
+                return JSONResponse(status_code=422, content={
+                    "title": "Brak klucza Ergonode",
+                    "detail": "Import wymaga klucza API Ergonode "
+                              "z uprawnieniem zapisu",
+                    "violations": violations
+                })
 
-    # Persist - atomic per step to avoid race conditions
+    # Persist - atomic per step
     store.update_config_step(iid, index, config)
-
     return JSONResponse(status_code=200, content={})
 
 
@@ -416,7 +437,6 @@ async def consume_event(
     body = await request.json()
     token = x_app_token
 
-    # Lifecycle events: may not have shared_secret yet
     if event_name in ("app_installed", "app_uninstalled"):
         claims = _get_claims(token)
         iid = _get_installation_id(claims)
@@ -439,13 +459,11 @@ async def consume_event(
         inst["installed"] = True
         inst["api_url"] = _get_api_url(claims)
         store.save_installation(iid, inst)
-        logger.info(f"[CONSUME] app_installed OK for {iid}")
         return JSONResponse(status_code=200, content={})
 
     # -- app_uninstalled --
     if event_name == "app_uninstalled":
         store.remove_installation(iid)
-        logger.info(f"[CONSUME] app_uninstalled for {iid}")
         return JSONResponse(status_code=200, content={})
 
     # -- Sync events: load config --
@@ -464,13 +482,7 @@ async def consume_event(
     mapping_config = configs[1] if len(configs) > 1 else {}
     sync_config = configs[2] if len(configs) > 2 else {}
 
-    # Check sync direction
     direction = sync_config.get("syncDirection", "ergonode_to_sellasist")
-    if direction == "sellasist_to_ergonode":
-        logger.info(
-            f"[CONSUME] Skipping {event_name} - direction is import "
-            f"(sellasist_to_ergonode), not yet implemented")
-        return JSONResponse(status_code=200, content={})
 
     try:
         handler = SyncHandler(
@@ -482,7 +494,7 @@ async def consume_event(
             installation_id=iid,
         )
     except Exception as e:
-        logger.error(f"[CONSUME] Init error: {e}")
+        logger.error(f"[CONSUME] Init error: {e}", exc_info=True)
         return JSONResponse(status_code=422, content={
             "title": "Błąd inicjalizacji",
             "detail": str(e)[:256],
@@ -498,7 +510,7 @@ async def consume_event(
 
     logger.info(
         f"[CONSUME] Processing {event_name}: resource={sku_or_code} "
-        f"customs={customs is not None} events_count={len(events)} "
+        f"customs={customs is not None} events={len(events)} "
         f"direction={direction} mode={sync_config.get('syncMode')}")
 
     try:
@@ -525,16 +537,15 @@ async def consume_event(
 
         if result and isinstance(result, dict):
             logger.info(
-                f"[CONSUME] {event_name} {sku_or_code} -> "
-                f"resource_customs={result}")
+                f"[CONSUME] {event_name} {sku_or_code} -> {result}")
             return JSONResponse(status_code=200, content=result)
 
-        logger.info(f"[CONSUME] {event_name} {sku_or_code} -> OK (no customs)")
         return JSONResponse(status_code=200, content={})
 
     except Exception as e:
-        logger.error(f"[CONSUME] Error {event_name} {sku_or_code}: {e}",
-                     exc_info=True)
+        logger.error(
+            f"[CONSUME] Error {event_name} {sku_or_code}: {e}",
+            exc_info=True)
         return JSONResponse(status_code=422, content={
             "title": "Błąd synchronizacji",
             "detail": str(e)[:256],
@@ -548,7 +559,7 @@ async def consume_event(
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "4.2.0"}
+    return {"status": "ok", "version": "4.3.0"}
 
 
 # ---------------------------------------------------------------------------

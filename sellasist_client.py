@@ -21,7 +21,8 @@ class SellasistClient:
         if shop_domain.startswith("http"):
             self.base_url = shop_domain.rstrip("/")
         else:
-            clean = shop_domain.strip().rstrip("/").replace(".sellasist.pl", "")
+            clean = (shop_domain.strip().rstrip("/")
+                     .replace(".sellasist.pl", ""))
             self.base_url = f"https://{clean}.sellasist.pl/api/v1"
         self.headers = {
             "accept": "application/json",
@@ -79,25 +80,43 @@ class SellasistClient:
         except Exception as e:
             return False, str(e)
 
+    # -- Products: read --
     async def find_product_by_symbol(self, symbol: str):
-        result = await self._request("GET", "/products",
-                                     params={"symbol": symbol, "limit": 1})
+        result = await self._request(
+            "GET", "/products",
+            params={"symbol": symbol, "limit": 1})
         if isinstance(result, list) and result:
             return result[0]
         if isinstance(result, dict) and result.get("items"):
             return result["items"][0]
         return None
 
+    async def get_product_by_id(self, product_id: int) -> Optional[dict]:
+        """Get full product data by Sellasist product ID."""
+        result = await self._request("GET", f"/products/{product_id}")
+        if isinstance(result, dict) and not result.get("error"):
+            return result
+        return None
+
+    async def get_product_full(self, symbol: str) -> Optional[dict]:
+        """Find product by symbol and return full data."""
+        product = await self.find_product_by_symbol(symbol)
+        if product and product.get("id"):
+            return await self.get_product_by_id(product["id"])
+        return product
+
+    # -- Products: write --
     async def create_product(self, data: dict):
         return await self._request("POST", "/products", json_data=data)
 
     async def update_product(self, product_id: int, data: dict):
-        return await self._request("PUT", f"/products/{product_id}",
-                                   json_data=data)
+        return await self._request(
+            "PUT", f"/products/{product_id}", json_data=data)
 
     async def delete_product(self, product_id: int):
         return await self._request("DELETE", f"/products/{product_id}")
 
+    # -- Categories --
     async def find_category_by_name(self, name: str):
         result = await self._request("GET", "/categories")
         if isinstance(result, list):
@@ -110,9 +129,8 @@ class SellasistClient:
         return await self._request("POST", "/categories", json_data=data)
 
     async def update_category(self, category_id: int, data: dict):
-        return await self._request("PUT", f"/categories/{category_id}",
-                                   json_data=data)
+        return await self._request(
+            "PUT", f"/categories/{category_id}", json_data=data)
 
     async def delete_category(self, category_id: int):
-        """Delete or deactivate a category in Sellasist."""
         return await self._request("DELETE", f"/categories/{category_id}")

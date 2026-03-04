@@ -291,6 +291,9 @@ async def post_configuration(
         # Test Ergonode GraphQL connection (if key provided)
         if erg_key:
             api_url = _get_api_url(claims)
+            logger.info(
+                f"[CONFIG] Testing Ergonode GraphQL: api_url={api_url} "
+                f"key_len={len(erg_key)}")
             if api_url:
                 erg_client = ErgonodeClient(
                     api_url=api_url, api_key=erg_key)

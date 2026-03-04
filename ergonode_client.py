@@ -34,14 +34,25 @@ class ErgonodeClient:
     """Client for Ergonode GraphQL API using X-API-KEY auth."""
 
     def __init__(self, api_url: str, api_key: str):
-        self.api_url = api_url.rstrip("/")
+        # Normalize api_url: strip trailing slashes and /api suffix
+        # JWT claims may provide e.g. "https://x.ergonode.cloud/api"
+        # but GraphQL endpoint is always "{base}/api/graphql/"
+        raw_url = api_url.rstrip("/")
+        # Remove trailing /api if present (avoid /api/api/graphql/)
+        if raw_url.endswith("/api"):
+            raw_url = raw_url[:-4]
+        self.api_url = raw_url
         self.graphql_url = f"{self.api_url}/api/graphql/"
         self.api_key = api_key
         self.headers = {
             "Content-Type": "application/json",
             "X-API-KEY": self.api_key,
         }
-        logger.info(f"[ERGONODE] graphql_url={self.graphql_url}")
+        logger.info(
+            f"[ERGONODE] api_url_raw={api_url} "
+            f"normalized={self.api_url} "
+            f"graphql_url={self.graphql_url} "
+            f"api_key_len={len(api_key)}")
 
     async def _graphql_request(self, query: str,
                                 variables: Optional[dict] = None) -> dict:
@@ -111,12 +122,19 @@ class ErgonodeClient:
 
     async def test_connection(self) -> tuple:
         """Test connection and write access."""
+        logger.info(
+            f"[ERGONODE] Testing connection to {self.graphql_url}")
         result = await self._graphql_request("{ languageList { code } }")
         if "errors" in result:
             msg = result["errors"][0].get("message", "Unknown error")
+            logger.error(f"[ERGONODE] Test failed: {msg}")
             return False, msg
         if "data" in result and result["data"].get("languageList"):
+            langs = [l["code"]
+                     for l in result["data"]["languageList"]]
+            logger.info(f"[ERGONODE] Test OK, languages: {langs}")
             return True, ""
+        logger.error(f"[ERGONODE] Test unexpected: {result}")
         return False, "Unexpected response"
 
     async def update_product_attribute(

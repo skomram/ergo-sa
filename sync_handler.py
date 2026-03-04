@@ -1,5 +1,5 @@
 """
-Sync logic Ergonode -> Sellasist v4.0.0
+Sync logic Ergonode -> Sellasist v4.1.0
 
 Handles synchronization events from Ergonode Apps Engine v2.
 Mapper widget output: [{"ergonode": "attr_code", "app": "sellasist_field"}, ...]
@@ -104,6 +104,10 @@ class SyncHandler:
         return {"resource_customs": {"sellasist_id": sid}}
 
     async def handle_product_deleted(self, sku, customs):
+        """
+        Deactivate product instead of deleting - safer for e-commerce.
+        Product remains in Sellasist but is set as inactive.
+        """
         sid = _gc(customs, "sellasist_id")
         if sid:
             await self.sellasist.update_product(int(sid), {"active": 0})
@@ -131,6 +135,28 @@ class SyncHandler:
 
     async def handle_category_updated(self, code, customs, events):
         return await self.handle_category_created(code, customs, events)
+
+    async def handle_category_deleted(self, code, customs):
+        """
+        Handle category deletion from Ergonode.
+        Attempts to delete category in Sellasist if ID is stored in customs.
+        """
+        if not self.sync_categories:
+            return None
+
+        sid = _gc(customs, "sellasist_category_id")
+        if sid:
+            result = await self.sellasist.delete_category(int(sid))
+            if isinstance(result, dict) and result.get("error"):
+                logger.warning(
+                    f"[SYNC] Category delete failed {code}: {result['error']}")
+            else:
+                logger.info(f"[SYNC] Category deleted: {code} -> {sid}")
+        else:
+            logger.info(
+                f"[SYNC] Category delete skipped (no sellasist_category_id): "
+                f"{code}")
+        return None
 
     # -- Extract -----------------------------------------------------------
     def _extract(self, sku: str, events: list) -> dict:

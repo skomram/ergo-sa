@@ -11,6 +11,7 @@ COPY manifest.json .
 ENV PORT=8000
 ENV LOG_LEVEL=INFO
 ENV STORAGE_DIR=/data/installations
+ENV ENCRYPTION_KEY=""
 
 RUN mkdir -p /data/installations
 

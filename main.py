@@ -1,7 +1,7 @@
 """
 Sellasist Connector for Ergonode Apps Engine v2
 ================================================
-Version: 4.0.0
+Version: 4.1.0
 
 Endpoints per https://docs.ergonode.com/apps2/:
   GET  /                     - Root info (Render health check)
@@ -10,9 +10,19 @@ Endpoints per https://docs.ergonode.com/apps2/:
   GET  /configuration        - Return saved configuration
   POST /configuration        - Validate & save configuration step
   GET  /dictionary/{id}      - Return dictionary data
-  PUT  /event/{event}        - Handle app lifecycle events
-  PUT  /consume/{event}      - Handle synchronization events
+  PUT  /consume/{event}      - Handle all events (lifecycle + sync)
   GET  /health               - Health check
+
+Changes v4.1.0:
+  - JWT signature verification on all authenticated endpoints
+  - Removed dead /event/ endpoint (v2 uses /consume/ for everything)
+  - Fixed JWT claim name: api_url (with ergonode_api_url fallback)
+  - Added synchronization_scheduler feature
+  - Added type field to dictionary entries for mapper validation
+  - Added allows_merging for pictures dictionary entry
+  - Added category_deleted handling
+  - Encrypted shared_secret at rest (via config_store)
+  - Added icon to manifest
 """
 import os
 import json
@@ -48,32 +58,62 @@ store = ConfigStore()
 
 # Dictionary: app:sellasist_fields
 # Ref: https://docs.ergonode.com/apps2/detailed-reference/manifest/dictionaries
-# Format: {"dictionary": [{"id": "...", "label": "..."}]}
+# Format: {"dictionary": [{"id": "...", "label": "...", "type": "...", ...}]}
+#
+# type field enables mapper type validation:
+#   Ergonode attribute types mapped to Sellasist field compatibility.
+#   Multiple types separated with |
+#
+# allows_merging: when true, multiple Ergonode attributes can map to
+#   the same Sellasist field (merged by App logic)
+#
 # __skip__ allows user to skip mapping for fields they don't need.
 SELLASIST_FIELDS = [
     {"id": "__skip__",       "label": "[Pomiń - nie synchronizuj]"},
-    {"id": "name",           "label": "Nazwa produktu"},
-    {"id": "description",    "label": "Opis produktu"},
-    {"id": "price",          "label": "Cena sprzedaży"},
-    {"id": "price_promo",    "label": "Cena promocyjna"},
-    {"id": "price_buy",      "label": "Cena zakupu"},
-    {"id": "quantity",       "label": "Stan magazynowy"},
-    {"id": "ean",            "label": "Kod EAN"},
-    {"id": "symbol",         "label": "Symbol (SKU)"},
-    {"id": "active",         "label": "Aktywny (0/1)"},
-    {"id": "weight",         "label": "Waga (kg)"},
-    {"id": "category_id",    "label": "ID kategorii"},
-    {"id": "pictures",       "label": "Zdjęcia"},
-    {"id": "manufacturer",   "label": "Producent"},
-    {"id": "catalog_number", "label": "Numer katalogowy"},
-    {"id": "volume",         "label": "Objętość"},
-    {"id": "location",       "label": "Lokalizacja"},
-    {"id": "cf_1",           "label": "Pole dodatkowe 1"},
-    {"id": "cf_2",           "label": "Pole dodatkowe 2"},
-    {"id": "cf_3",           "label": "Pole dodatkowe 3"},
-    {"id": "cf_4",           "label": "Pole dodatkowe 4"},
-    {"id": "cf_5",           "label": "Pole dodatkowe 5"},
-    {"id": "cf_6",           "label": "Pole dodatkowe 6"},
+    {"id": "name",           "label": "Nazwa produktu",
+     "type": "TEXT|TEXT_AREA"},
+    {"id": "description",    "label": "Opis produktu",
+     "type": "TEXT_AREA|TEXT", "allows_merging": True},
+    {"id": "price",          "label": "Cena sprzedaży",
+     "type": "NUMERIC|PRICE|UNIT"},
+    {"id": "price_promo",    "label": "Cena promocyjna",
+     "type": "NUMERIC|PRICE|UNIT"},
+    {"id": "price_buy",      "label": "Cena zakupu",
+     "type": "NUMERIC|PRICE|UNIT"},
+    {"id": "quantity",       "label": "Stan magazynowy",
+     "type": "NUMERIC"},
+    {"id": "ean",            "label": "Kod EAN",
+     "type": "TEXT"},
+    {"id": "symbol",         "label": "Symbol (SKU)",
+     "type": "TEXT"},
+    {"id": "active",         "label": "Aktywny (0/1)",
+     "type": "NUMERIC|SELECT"},
+    {"id": "weight",         "label": "Waga (kg)",
+     "type": "NUMERIC|UNIT"},
+    {"id": "category_id",    "label": "ID kategorii",
+     "type": "NUMERIC|SELECT"},
+    {"id": "pictures",       "label": "Zdjęcia",
+     "type": "IMAGE|GALLERY", "allows_merging": True},
+    {"id": "manufacturer",   "label": "Producent",
+     "type": "TEXT|SELECT"},
+    {"id": "catalog_number", "label": "Numer katalogowy",
+     "type": "TEXT"},
+    {"id": "volume",         "label": "Objętość",
+     "type": "NUMERIC|UNIT"},
+    {"id": "location",       "label": "Lokalizacja",
+     "type": "TEXT"},
+    {"id": "cf_1",           "label": "Pole dodatkowe 1",
+     "type": "TEXT|TEXT_AREA|NUMERIC|SELECT|MULTI_SELECT|DATE"},
+    {"id": "cf_2",           "label": "Pole dodatkowe 2",
+     "type": "TEXT|TEXT_AREA|NUMERIC|SELECT|MULTI_SELECT|DATE"},
+    {"id": "cf_3",           "label": "Pole dodatkowe 3",
+     "type": "TEXT|TEXT_AREA|NUMERIC|SELECT|MULTI_SELECT|DATE"},
+    {"id": "cf_4",           "label": "Pole dodatkowe 4",
+     "type": "TEXT|TEXT_AREA|NUMERIC|SELECT|MULTI_SELECT|DATE"},
+    {"id": "cf_5",           "label": "Pole dodatkowe 5",
+     "type": "TEXT|TEXT_AREA|NUMERIC|SELECT|MULTI_SELECT|DATE"},
+    {"id": "cf_6",           "label": "Pole dodatkowe 6",
+     "type": "TEXT|TEXT_AREA|NUMERIC|SELECT|MULTI_SELECT|DATE"},
 ]
 
 # ---------------------------------------------------------------------------
@@ -81,11 +121,11 @@ SELLASIST_FIELDS = [
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Sellasist Connector v4.0.0 starting")
+    logger.info("Sellasist Connector v4.1.0 starting")
     yield
     logger.info("Sellasist Connector shutting down")
 
-app = FastAPI(title="Sellasist Connector", version="4.0.0", lifespan=lifespan)
+app = FastAPI(title="Sellasist Connector", version="4.1.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -107,12 +147,64 @@ def _get_installation_id(claims: dict) -> str:
     return claims.get("app_installation_id", "unknown")
 
 
+def _get_api_url(claims: dict) -> str:
+    """
+    Extract Ergonode API URL from JWT claims.
+    Docs reference: api_url
+    Fallback: ergonode_api_url (for backward compat with older Ergonode)
+    """
+    return claims.get("api_url", "") or claims.get("ergonode_api_url", "")
+
+
+def _verify_request(token: Optional[str], store_ref: ConfigStore) -> tuple:
+    """
+    Full JWT authentication flow per Ergonode docs:
+    1. Decode without verification to get app_installation_id
+    2. Look up shared_secret from store
+    3. Verify JWT signature with HMAC SHA-256
+
+    Returns: (verified_claims, installation_id, error_response)
+    If error_response is not None, return it immediately.
+    """
+    if not token:
+        return None, "unknown", JSONResponse(
+            status_code=401,
+            content={"error": "Missing X-APP-TOKEN header"})
+
+    # Step 1: extract installation_id without verification
+    unverified = decode_jwt_unverified(token)
+    iid = _get_installation_id(unverified)
+
+    if iid == "unknown":
+        return None, iid, JSONResponse(
+            status_code=401,
+            content={"error": "Missing app_installation_id in token"})
+
+    # Step 2: look up shared_secret
+    inst = store_ref.get_installation(iid)
+    if not inst or not inst.get("shared_secret"):
+        logger.warning(f"[AUTH] No shared_secret for {iid}")
+        return None, iid, JSONResponse(
+            status_code=401,
+            content={"error": "Unknown installation or missing secret"})
+
+    # Step 3: verify signature
+    verified = verify_jwt_signature(token, inst["shared_secret"])
+    if verified is None:
+        logger.warning(f"[AUTH] JWT verification failed for {iid}")
+        return None, iid, JSONResponse(
+            status_code=401,
+            content={"error": "Invalid JWT signature"})
+
+    return verified, iid, None
+
+
 # ---------------------------------------------------------------------------
 # GET / - Root (Render health check needs 200 on /)
 # ---------------------------------------------------------------------------
 @app.get("/")
 async def root():
-    return {"app": "Sellasist Connector", "version": "4.0.0", "status": "ok"}
+    return {"app": "Sellasist Connector", "version": "4.1.0", "status": "ok"}
 
 
 @app.head("/")
@@ -145,6 +237,9 @@ async def manifest_head():
 # ---------------------------------------------------------------------------
 # POST /handshake
 # Ref: https://docs.ergonode.com/apps2/detailed-reference/authentication
+#
+# This is the ONLY endpoint that cannot verify JWT signature
+# because we don't yet have the shared_secret.
 # ---------------------------------------------------------------------------
 @app.post("/handshake")
 async def handshake(request: Request):
@@ -152,7 +247,7 @@ async def handshake(request: Request):
     Receive shared_secret from Ergonode on app installation.
     Body: {"shared_secret": "..."}
     X-APP-TOKEN header contains JWT with claims:
-      app_installation_id, ergonode_api_url
+      app_installation_id, api_url
     Response: 2xx = success
     """
     body = await request.json()
@@ -166,7 +261,7 @@ async def handshake(request: Request):
 
     inst = store.get_installation(iid) or {}
     inst["shared_secret"] = shared_secret
-    inst["ergonode_api_url"] = claims.get("ergonode_api_url", "")
+    inst["api_url"] = _get_api_url(claims)
     inst["installation_id"] = iid
     store.save_installation(iid, inst)
 
@@ -182,10 +277,12 @@ async def handshake(request: Request):
 async def get_configuration(
         request: Request,
         x_app_token: str = Header(None, alias="X-APP-TOKEN")):
-    claims = _get_claims(x_app_token)
-    iid = _get_installation_id(claims)
-    inst = store.get_installation(iid)
+    # Verify JWT
+    claims, iid, err = _verify_request(x_app_token, store)
+    if err:
+        return err
 
+    inst = store.get_installation(iid)
     if not inst or "configuration" not in inst:
         return JSONResponse(status_code=200, content=[])
 
@@ -202,12 +299,14 @@ async def get_configuration(
 async def post_configuration(
         request: Request,
         x_app_token: str = Header(None, alias="X-APP-TOKEN")):
+    # Verify JWT
+    claims, iid, err = _verify_request(x_app_token, store)
+    if err:
+        return err
+
     body = await request.json()
     index = body.get("index", 0)
     config = body.get("configuration", {})
-
-    claims = _get_claims(x_app_token)
-    iid = _get_installation_id(claims)
 
     logger.info(f"[CONFIG] step={index} installation={iid} "
                 f"keys={list(config.keys())}")
@@ -242,15 +341,15 @@ async def post_configuration(
 
         # Test actual connection
         client = SellasistClient(api_key=key, shop_domain=host)
-        ok, err = await client.validate_connection()
+        ok, error_msg = await client.validate_connection()
         if not ok:
             return JSONResponse(status_code=422, content={
                 "title": "Błąd połączenia",
-                "detail": err,
+                "detail": error_msg,
                 "violations": [{
                     "propertyPath": "api_key",
-                    "title": err,
-                    "template": err,
+                    "title": error_msg,
+                    "template": error_msg,
                     "parameters": {}
                 }]
             })
@@ -326,15 +425,17 @@ async def post_configuration(
 # ---------------------------------------------------------------------------
 # GET /dictionary/{dictionary_id}
 # Ref: https://docs.ergonode.com/apps2/detailed-reference/manifest/dictionaries
-# Response: {"dictionary": [{"id": "...", "label": "..."}]}
+# Response: {"dictionary": [{"id": "...", "label": "...", "type": "..."}]}
 # ---------------------------------------------------------------------------
 @app.get("/dictionary/{dictionary_id}")
 async def get_dictionary(
         dictionary_id: str,
         request: Request,
         x_app_token: str = Header(None, alias="X-APP-TOKEN")):
-    claims = _get_claims(x_app_token)
-    iid = _get_installation_id(claims)
+    # Verify JWT
+    claims, iid, err = _verify_request(x_app_token, store)
+    if err:
+        return err
 
     logger.info(f"[DICT] Requested: {dictionary_id} installation={iid}")
 
@@ -348,38 +449,16 @@ async def get_dictionary(
 
 
 # ---------------------------------------------------------------------------
-# PUT /event/{event_name}
-# Ref: https://docs.ergonode.com/apps2/detailed-reference/event-endpoints
-# Events: app_installed, app_uninstalled
-# ---------------------------------------------------------------------------
-@app.put("/event/{event_name}")
-async def handle_event(
-        event_name: str,
-        request: Request,
-        x_app_token: str = Header(None, alias="X-APP-TOKEN")):
-    body = await request.json()
-    claims = _get_claims(x_app_token)
-    iid = _get_installation_id(claims)
-
-    logger.info(f"[EVENT] {event_name} installation={iid}")
-
-    if event_name == "app_installed":
-        inst = store.get_installation(iid) or {}
-        inst["installed"] = True
-        inst["ergonode_api_url"] = claims.get("ergonode_api_url", "")
-        store.save_installation(iid, inst)
-
-    elif event_name == "app_uninstalled":
-        store.remove_installation(iid)
-
-    return JSONResponse(status_code=200, content={})
-
-
-# ---------------------------------------------------------------------------
 # PUT /consume/{event_name}
+# Ref: https://docs.ergonode.com/apps2/detailed-reference/event-endpoints
 # Ref: https://docs.ergonode.com/apps2/detailed-reference/synchronization
 #
-# Payload:
+# In Apps Engine v2, ALL events (lifecycle + sync) come through /consume/
+#
+# Lifecycle events:
+#   app_installed, app_uninstalled
+#
+# Sync events payload:
 # {
 #   "name": "product_created",
 #   "resource_id": {"id": "SKU", "type": "sku"},
@@ -390,6 +469,7 @@ async def handle_event(
 # }
 #
 # Response 2xx = success (optionally with resource_customs)
+# Response 204 = success without persisting resource_customs
 # Response 422 = error with retryable flag
 # ---------------------------------------------------------------------------
 @app.put("/consume/{event_name}")
@@ -398,33 +478,43 @@ async def consume_event(
         request: Request,
         x_app_token: str = Header(None, alias="X-APP-TOKEN")):
     body = await request.json()
-    claims = _get_claims(x_app_token)
-    iid = _get_installation_id(claims)
+    token = x_app_token
+
+    # For app_installed we may not have shared_secret yet if handshake
+    # just happened, so use unverified claims for lifecycle events.
+    # For sync events, we verify JWT fully.
+    if event_name in ("app_installed", "app_uninstalled"):
+        claims = _get_claims(token)
+        iid = _get_installation_id(claims)
+    else:
+        claims, iid, err = _verify_request(token, store)
+        if err:
+            return err
 
     logger.info(f"[CONSUME] {event_name} installation={iid}")
 
-    # synchronization_ended
+    # -- synchronization_ended --
     if event_name == "synchronization_ended":
         sync_id = claims.get("synchronization_id", "?")
         logger.info(f"[CONSUME] Sync ended: sync_id={sync_id}")
         return JSONResponse(status_code=200, content={})
 
-    # app_installed - lifecycle event routed through /consume/
+    # -- app_installed --
     if event_name == "app_installed":
         inst = store.get_installation(iid) or {}
         inst["installed"] = True
-        inst["ergonode_api_url"] = claims.get("ergonode_api_url", "")
+        inst["api_url"] = _get_api_url(claims)
         store.save_installation(iid, inst)
         logger.info(f"[CONSUME] app_installed OK for {iid}")
         return JSONResponse(status_code=200, content={})
 
-    # app_uninstalled
+    # -- app_uninstalled --
     if event_name == "app_uninstalled":
         store.remove_installation(iid)
         logger.info(f"[CONSUME] app_uninstalled for {iid}")
         return JSONResponse(status_code=200, content={})
 
-    # Load config
+    # -- Sync events: load config --
     inst = store.get_installation(iid)
     if not inst or "configuration" not in inst:
         logger.error(f"[CONSUME] No config for {iid}")
@@ -445,7 +535,7 @@ async def consume_event(
             sellasist_config=sellasist_config,
             mapping_config=mapping_config,
             sync_config=sync_config,
-            ergonode_api_url=claims.get("ergonode_api_url", ""),
+            ergonode_api_url=_get_api_url(claims),
             shared_secret=inst.get("shared_secret", ""),
             installation_id=iid,
         )
@@ -482,7 +572,7 @@ async def consume_event(
             result = await handler.handle_category_updated(
                 sku_or_code, customs, events)
         elif event_name == "category_deleted":
-            logger.info(f"[CONSUME] Category deleted: {sku_or_code}")
+            await handler.handle_category_deleted(sku_or_code, customs)
         else:
             logger.warning(f"[CONSUME] Unknown: {event_name}")
 
@@ -506,7 +596,7 @@ async def consume_event(
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "4.0.0"}
+    return {"status": "ok", "version": "4.1.0"}
 
 
 # ---------------------------------------------------------------------------

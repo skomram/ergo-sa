@@ -7,6 +7,11 @@ All requests include X-APP-TOKEN header.
 
 Key JWT claim: app_installation_id
 Sync context adds: synchronization_id
+
+Authentication flow:
+1. Extract app_installation_id from JWT without verification
+2. Look up shared_secret from persistent storage
+3. Verify JWT signature using HMAC SHA-256
 """
 import jwt
 import time

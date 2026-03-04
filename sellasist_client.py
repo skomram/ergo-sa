@@ -5,7 +5,7 @@ Async HTTP with rate limiting and retry.
 import httpx
 import asyncio
 import logging
-from typing import Tuple
+from typing import Tuple, Optional
 
 logger = logging.getLogger("sellasist-app.client")
 
@@ -112,3 +112,7 @@ class SellasistClient:
     async def update_category(self, category_id: int, data: dict):
         return await self._request("PUT", f"/categories/{category_id}",
                                    json_data=data)
+
+    async def delete_category(self, category_id: int):
+        """Delete or deactivate a category in Sellasist."""
+        return await self._request("DELETE", f"/categories/{category_id}")

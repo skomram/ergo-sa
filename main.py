@@ -1,7 +1,7 @@
 """
 Sellasist Connector for Ergonode Apps Engine v2
 ================================================
-Version: 4.1.0
+Version: 4.2.0
 
 Endpoints per https://docs.ergonode.com/apps2/:
   GET  /                     - Root info (Render health check)
@@ -13,16 +13,14 @@ Endpoints per https://docs.ergonode.com/apps2/:
   PUT  /consume/{event}      - Handle all events (lifecycle + sync)
   GET  /health               - Health check
 
-Changes v4.1.0:
-  - JWT signature verification on all authenticated endpoints
-  - Removed dead /event/ endpoint (v2 uses /consume/ for everything)
-  - Fixed JWT claim name: api_url (with ergonode_api_url fallback)
-  - Added synchronization_scheduler feature
-  - Added type field to dictionary entries for mapper validation
-  - Added allows_merging for pictures dictionary entry
-  - Added category_deleted handling
-  - Encrypted shared_secret at rest (via config_store)
-  - Added icon to manifest
+Changes v4.2.0:
+  - FIXED: Race condition - concurrent config step saves no longer
+    overwrite each other (atomic read-modify-write per step)
+  - Added syncDirection field (ergonode_to_sellasist / sellasist_to_ergonode)
+  - Import direction (sellasist_to_ergonode) is validated but not yet
+    implemented - requires write_access:true in manifest
+  - Improved logging in sync handler for debugging
+  - compatible bumped to 4.1.0 to force reconfiguration
 """
 import os
 import json
@@ -57,17 +55,6 @@ MANIFEST_PATH = os.path.join(
 store = ConfigStore()
 
 # Dictionary: app:sellasist_fields
-# Ref: https://docs.ergonode.com/apps2/detailed-reference/manifest/dictionaries
-# Format: {"dictionary": [{"id": "...", "label": "...", "type": "...", ...}]}
-#
-# type field enables mapper type validation:
-#   Ergonode attribute types mapped to Sellasist field compatibility.
-#   Multiple types separated with |
-#
-# allows_merging: when true, multiple Ergonode attributes can map to
-#   the same Sellasist field (merged by App logic)
-#
-# __skip__ allows user to skip mapping for fields they don't need.
 SELLASIST_FIELDS = [
     {"id": "__skip__",       "label": "[Pomiń - nie synchronizuj]"},
     {"id": "name",           "label": "Nazwa produktu",
@@ -121,57 +108,43 @@ SELLASIST_FIELDS = [
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Sellasist Connector v4.1.0 starting")
+    logger.info("Sellasist Connector v4.2.0 starting")
     yield
     logger.info("Sellasist Connector shutting down")
 
-app = FastAPI(title="Sellasist Connector", version="4.1.0", lifespan=lifespan)
+app = FastAPI(title="Sellasist Connector", version="4.2.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 def _get_claims(token: Optional[str]) -> dict:
-    """Decode JWT from X-APP-TOKEN header without verification."""
     if not token:
         return {}
     return decode_jwt_unverified(token)
 
 
 def _get_installation_id(claims: dict) -> str:
-    """
-    Extract installation ID from JWT claims.
-    Ref: https://docs.ergonode.com/apps2/detailed-reference/authentication
-    Claim name: app_installation_id
-    """
     return claims.get("app_installation_id", "unknown")
 
 
 def _get_api_url(claims: dict) -> str:
-    """
-    Extract Ergonode API URL from JWT claims.
-    Docs reference: api_url
-    Fallback: ergonode_api_url (for backward compat with older Ergonode)
-    """
     return claims.get("api_url", "") or claims.get("ergonode_api_url", "")
 
 
 def _verify_request(token: Optional[str], store_ref: ConfigStore) -> tuple:
     """
-    Full JWT authentication flow per Ergonode docs:
+    Full JWT auth per Ergonode docs:
     1. Decode without verification to get app_installation_id
-    2. Look up shared_secret from store
+    2. Look up shared_secret
     3. Verify JWT signature with HMAC SHA-256
-
     Returns: (verified_claims, installation_id, error_response)
-    If error_response is not None, return it immediately.
     """
     if not token:
         return None, "unknown", JSONResponse(
             status_code=401,
             content={"error": "Missing X-APP-TOKEN header"})
 
-    # Step 1: extract installation_id without verification
     unverified = decode_jwt_unverified(token)
     iid = _get_installation_id(unverified)
 
@@ -180,7 +153,6 @@ def _verify_request(token: Optional[str], store_ref: ConfigStore) -> tuple:
             status_code=401,
             content={"error": "Missing app_installation_id in token"})
 
-    # Step 2: look up shared_secret
     inst = store_ref.get_installation(iid)
     if not inst or not inst.get("shared_secret"):
         logger.warning(f"[AUTH] No shared_secret for {iid}")
@@ -188,7 +160,6 @@ def _verify_request(token: Optional[str], store_ref: ConfigStore) -> tuple:
             status_code=401,
             content={"error": "Unknown installation or missing secret"})
 
-    # Step 3: verify signature
     verified = verify_jwt_signature(token, inst["shared_secret"])
     if verified is None:
         logger.warning(f"[AUTH] JWT verification failed for {iid}")
@@ -200,11 +171,11 @@ def _verify_request(token: Optional[str], store_ref: ConfigStore) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# GET / - Root (Render health check needs 200 on /)
+# GET / - Root
 # ---------------------------------------------------------------------------
 @app.get("/")
 async def root():
-    return {"app": "Sellasist Connector", "version": "4.1.0", "status": "ok"}
+    return {"app": "Sellasist Connector", "version": "4.2.0", "status": "ok"}
 
 
 @app.head("/")
@@ -213,7 +184,7 @@ async def root_head():
 
 
 # ---------------------------------------------------------------------------
-# GET /manifest.json - Serve manifest for Ergonode registration
+# GET /manifest.json
 # ---------------------------------------------------------------------------
 @app.get("/manifest.json")
 async def get_manifest():
@@ -236,20 +207,9 @@ async def manifest_head():
 
 # ---------------------------------------------------------------------------
 # POST /handshake
-# Ref: https://docs.ergonode.com/apps2/detailed-reference/authentication
-#
-# This is the ONLY endpoint that cannot verify JWT signature
-# because we don't yet have the shared_secret.
 # ---------------------------------------------------------------------------
 @app.post("/handshake")
 async def handshake(request: Request):
-    """
-    Receive shared_secret from Ergonode on app installation.
-    Body: {"shared_secret": "..."}
-    X-APP-TOKEN header contains JWT with claims:
-      app_installation_id, api_url
-    Response: 2xx = success
-    """
     body = await request.json()
     shared_secret = body.get("shared_secret", "")
     token = request.headers.get("X-APP-TOKEN", "")
@@ -270,14 +230,11 @@ async def handshake(request: Request):
 
 # ---------------------------------------------------------------------------
 # GET /configuration
-# Ref: https://docs.ergonode.com/apps2/detailed-reference/configuration
-# Response: array of config objects, one per step
 # ---------------------------------------------------------------------------
 @app.get("/configuration")
 async def get_configuration(
         request: Request,
         x_app_token: str = Header(None, alias="X-APP-TOKEN")):
-    # Verify JWT
     claims, iid, err = _verify_request(x_app_token, store)
     if err:
         return err
@@ -291,15 +248,12 @@ async def get_configuration(
 
 # ---------------------------------------------------------------------------
 # POST /configuration
-# Ref: https://docs.ergonode.com/apps2/detailed-reference/configuration
-# Body: {"index": 0, "configuration": {...}}
-# Response: 2xx = success, 422 = validation error with violations
+# Uses store.update_config_step() for atomic per-step persistence
 # ---------------------------------------------------------------------------
 @app.post("/configuration")
 async def post_configuration(
         request: Request,
         x_app_token: str = Header(None, alias="X-APP-TOKEN")):
-    # Verify JWT
     claims, iid, err = _verify_request(x_app_token, store)
     if err:
         return err
@@ -310,8 +264,6 @@ async def post_configuration(
 
     logger.info(f"[CONFIG] step={index} installation={iid} "
                 f"keys={list(config.keys())}")
-
-    inst = store.get_installation(iid) or {}
 
     # --- Step 0: Validate Sellasist connection ---
     if index == 0:
@@ -339,7 +291,6 @@ async def post_configuration(
                 "violations": violations
             })
 
-        # Test actual connection
         client = SellasistClient(api_key=key, shop_domain=host)
         ok, error_msg = await client.validate_connection()
         if not ok:
@@ -386,53 +337,59 @@ async def post_configuration(
 
     # --- Step 2: Sync settings ---
     if index == 2:
+        direction = config.get("syncDirection", "")
         lang = config.get("defaultLanguage", "")
         mode = config.get("syncMode", "")
+        violations = []
+
+        if not direction:
+            violations.append({
+                "propertyPath": "syncDirection",
+                "title": "Wybierz kierunek synchronizacji",
+                "template": "Wybierz kierunek synchronizacji",
+                "parameters": {}
+            })
         if not lang:
-            return JSONResponse(status_code=422, content={
-                "title": "Błąd walidacji",
-                "detail": "Język domyślny jest wymagany",
-                "violations": [{
-                    "propertyPath": "defaultLanguage",
-                    "title": "Wybierz język domyślny",
-                    "template": "Wybierz język domyślny",
-                    "parameters": {}
-                }]
+            violations.append({
+                "propertyPath": "defaultLanguage",
+                "title": "Wybierz język domyślny",
+                "template": "Wybierz język domyślny",
+                "parameters": {}
             })
         if not mode:
+            violations.append({
+                "propertyPath": "syncMode",
+                "title": "Wybierz tryb synchronizacji",
+                "template": "Wybierz tryb synchronizacji",
+                "parameters": {}
+            })
+        if violations:
             return JSONResponse(status_code=422, content={
                 "title": "Błąd walidacji",
-                "detail": "Tryb synchronizacji jest wymagany",
-                "violations": [{
-                    "propertyPath": "syncMode",
-                    "title": "Wybierz tryb synchronizacji",
-                    "template": "Wybierz tryb synchronizacji",
-                    "parameters": {}
-                }]
+                "detail": "Wypełnij wymagane pola",
+                "violations": violations
             })
 
-    # Persist
-    configs = inst.get("configuration", [])
-    while len(configs) <= index:
-        configs.append({})
-    configs[index] = config
-    inst["configuration"] = configs
-    store.save_installation(iid, inst)
+        # Warn about import direction (not yet implemented)
+        if direction == "sellasist_to_ergonode":
+            logger.warning(
+                f"[CONFIG] Import direction selected for {iid} - "
+                f"requires write_access:true, not yet implemented")
+
+    # Persist - atomic per step to avoid race conditions
+    store.update_config_step(iid, index, config)
 
     return JSONResponse(status_code=200, content={})
 
 
 # ---------------------------------------------------------------------------
 # GET /dictionary/{dictionary_id}
-# Ref: https://docs.ergonode.com/apps2/detailed-reference/manifest/dictionaries
-# Response: {"dictionary": [{"id": "...", "label": "...", "type": "..."}]}
 # ---------------------------------------------------------------------------
 @app.get("/dictionary/{dictionary_id}")
 async def get_dictionary(
         dictionary_id: str,
         request: Request,
         x_app_token: str = Header(None, alias="X-APP-TOKEN")):
-    # Verify JWT
     claims, iid, err = _verify_request(x_app_token, store)
     if err:
         return err
@@ -450,27 +407,6 @@ async def get_dictionary(
 
 # ---------------------------------------------------------------------------
 # PUT /consume/{event_name}
-# Ref: https://docs.ergonode.com/apps2/detailed-reference/event-endpoints
-# Ref: https://docs.ergonode.com/apps2/detailed-reference/synchronization
-#
-# In Apps Engine v2, ALL events (lifecycle + sync) come through /consume/
-#
-# Lifecycle events:
-#   app_installed, app_uninstalled
-#
-# Sync events payload:
-# {
-#   "name": "product_created",
-#   "resource_id": {"id": "SKU", "type": "sku"},
-#   "synchronization": {
-#     "resource_customs": {...} | null,
-#     "events": [...]
-#   }
-# }
-#
-# Response 2xx = success (optionally with resource_customs)
-# Response 204 = success without persisting resource_customs
-# Response 422 = error with retryable flag
 # ---------------------------------------------------------------------------
 @app.put("/consume/{event_name}")
 async def consume_event(
@@ -480,9 +416,7 @@ async def consume_event(
     body = await request.json()
     token = x_app_token
 
-    # For app_installed we may not have shared_secret yet if handshake
-    # just happened, so use unverified claims for lifecycle events.
-    # For sync events, we verify JWT fully.
+    # Lifecycle events: may not have shared_secret yet
     if event_name in ("app_installed", "app_uninstalled"):
         claims = _get_claims(token)
         iid = _get_installation_id(claims)
@@ -530,6 +464,14 @@ async def consume_event(
     mapping_config = configs[1] if len(configs) > 1 else {}
     sync_config = configs[2] if len(configs) > 2 else {}
 
+    # Check sync direction
+    direction = sync_config.get("syncDirection", "ergonode_to_sellasist")
+    if direction == "sellasist_to_ergonode":
+        logger.info(
+            f"[CONSUME] Skipping {event_name} - direction is import "
+            f"(sellasist_to_ergonode), not yet implemented")
+        return JSONResponse(status_code=200, content={})
+
     try:
         handler = SyncHandler(
             sellasist_config=sellasist_config,
@@ -554,6 +496,11 @@ async def consume_event(
     customs = sync_data.get("resource_customs")
     events = sync_data.get("events", [])
 
+    logger.info(
+        f"[CONSUME] Processing {event_name}: resource={sku_or_code} "
+        f"customs={customs is not None} events_count={len(events)} "
+        f"direction={direction} mode={sync_config.get('syncMode')}")
+
     try:
         result = None
 
@@ -577,7 +524,12 @@ async def consume_event(
             logger.warning(f"[CONSUME] Unknown: {event_name}")
 
         if result and isinstance(result, dict):
+            logger.info(
+                f"[CONSUME] {event_name} {sku_or_code} -> "
+                f"resource_customs={result}")
             return JSONResponse(status_code=200, content=result)
+
+        logger.info(f"[CONSUME] {event_name} {sku_or_code} -> OK (no customs)")
         return JSONResponse(status_code=200, content={})
 
     except Exception as e:
@@ -596,7 +548,7 @@ async def consume_event(
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "4.1.0"}
+    return {"status": "ok", "version": "4.2.0"}
 
 
 # ---------------------------------------------------------------------------
